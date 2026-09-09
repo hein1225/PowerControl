@@ -117,6 +117,14 @@ export const supportsNativeTdpLimit = callable<[], boolean>("supports_native_tdp
 export const getCpuTopologyForUI = callable<[], CPUTopologyForUI>("get_cpu_topology_for_ui");
 export const setCpuOnlineList = callable<[number[]], boolean>("set_cpu_online_list");
 
+// ---------------- AI 智能调优（在线 API 版） ----------------
+export const getAiOnline = callable<[], any>("get_ai_online");
+export const setAiOnline = callable<[string, string, string], boolean>("set_ai_online");
+export const testAiOnline = callable<[], any>("test_ai_online");
+export const startAiTune = callable<[string, number, number, any, any], any>("start_ai_tune");
+export const getAiTuneStatus = callable<[], any>("get_ai_tune_status");
+export const stopAiTune = callable<[], boolean>("stop_ai_tune");
+
 
 const defaultCpuCoreInfo: CPUCoreInfo = {
   is_heterogeneous: false,

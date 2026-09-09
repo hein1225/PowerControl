@@ -14,6 +14,7 @@ try:
     from gpu import gpuManager
     from power_manager import PowerManager
     from sysInfo import sysInfoManager
+    from ai_tuner import aiTuner
 
     sys.path.append(f"{decky.DECKY_PLUGIN_DIR}/py_modules/site-packages")
 except Exception as e:
@@ -24,6 +25,7 @@ class Plugin:
     def __init__(self):
         self.confManager = confManager
         self.powerManager = PowerManager()
+        self.aiTuner = aiTuner
         # 使用单例模式，不再存储 fuseManager 实例
         # 而是每次通过 FuseManager.get_instance() 获取
 
@@ -693,4 +695,54 @@ class Plugin:
             return check_native_tdp_limit_support()
         except Exception as e:
             logger.error(f"Error checking native TDP limit support: {e}", exc_info=True)
+            return False
+
+    # ---------------- AI 智能调优（在线 API 版） ----------------
+    async def get_ai_online(self):
+        try:
+            return self.aiTuner.get_online()
+        except Exception as e:
+            logger.error(f"get_ai_online 失败: {e}", exc_info=True)
+            return {"configured": False, "base_url": "", "model": "", "collect_sec": 600}
+
+    async def set_ai_online(self, base_url: str, api_key: str, model: str) -> bool:
+        try:
+            return self.aiTuner.set_online(base_url, api_key, model)
+        except Exception as e:
+            logger.error(f"set_ai_online 失败: {e}", exc_info=True)
+            return False
+
+    async def test_ai_online(self):
+        try:
+            return self.aiTuner.test_online()
+        except Exception as e:
+            logger.error(f"test_ai_online 失败: {e}", exc_info=True)
+            return {"ok": False, "message": f"自检异常: {e}"}
+
+    async def start_ai_tune(
+        self,
+        app_id: str,
+        target_fps: int,
+        collect_sec: int,
+        current: dict,
+        caps: dict,
+    ):
+        try:
+            return self.aiTuner.start(app_id, target_fps, collect_sec, current, caps)
+        except Exception as e:
+            logger.error(f"start_ai_tune 失败: {e}", exc_info=True)
+            return {"started": False, "message": f"启动失败: {e}"}
+
+    async def get_ai_tune_status(self):
+        try:
+            return self.aiTuner.status()
+        except Exception as e:
+            logger.error(f"get_ai_tune_status 失败: {e}", exc_info=True)
+            return {"phase": "error", "error": str(e)}
+
+    async def stop_ai_tune(self) -> bool:
+        try:
+            return self.aiTuner.stop()
+        except Exception as e:
+            logger.error(f"stop_ai_tune 失败: {e}", exc_info=True)
             return False

@@ -505,6 +505,46 @@ export class Settings {
     }
   }
 
+  // AI 智能调优：把推荐增量写入当前游戏的专属设置，并开启「依游戏设置档案」开关
+  static applyAITuneRecommendation(delta: Record<string, any>) {
+    if (RunningApps.active() == DEFAULT_APP) {
+      return false;
+    }
+    // 确保在 perApp 中存在该游戏（缺失时从 DEFAULT_APP 复制基线）
+    const app = Settings.ensureApp();
+    const s = app.defaultSettig;
+    const numFields = [
+      "tdp",
+      "gpuFreq",
+      "gpuRangeMinFreq",
+      "gpuRangeMaxFreq",
+      "cpuNum",
+      "ryzenadjUndervoltValue",
+      "cpuMaxPerfPct",
+    ];
+    const boolFields = ["tdpEnable", "cpuboost", "smt", "enableRyzenadjUndervolt"];
+    const strFields = ["gpuMode", "cpuGovernor", "epp"];
+    numFields.forEach((f) => {
+      if (delta[f] !== undefined && delta[f] !== null) {
+        (s as any)[f] = Number(delta[f]);
+      }
+    });
+    boolFields.forEach((f) => {
+      if (delta[f] !== undefined && delta[f] !== null) {
+        (s as any)[f] = Boolean(delta[f]);
+      }
+    });
+    strFields.forEach((f) => {
+      if (delta[f] !== undefined && delta[f] !== null && delta[f] !== "") {
+        (s as any)[f] = String(delta[f]);
+      }
+    });
+    Settings.saveSettings();
+    // 开启专属设置开关：setOverWrite 会触发 SET_ALL 应用并保存/刷新
+    Settings.setOverWrite(true);
+    return true;
+  }
+
   // static appForceShowTDP(): boolean {
   //   return this._instance.data.forceShowTDP;
   // }

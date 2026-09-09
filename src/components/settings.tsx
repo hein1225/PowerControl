@@ -26,6 +26,7 @@ import {
   Logger,
 } from "../util";
 import { getPowerInfo } from "../util/backend";
+import AITuneComponent from "./aiTune";
 import { localizeStrEnum, localizationManager } from "../i18n";
 import { FaExclamationCircle } from "react-icons/fa";
 
@@ -336,6 +337,7 @@ export const SettingsComponent: FC<{
             <SettingsPerAppComponent />
             <SettingsPerAcStateComponent />
             <SettingsPollingComponent />
+            <AITuneComponent />
           </>
         )}
       </PanelSection>
