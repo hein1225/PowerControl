@@ -637,10 +637,13 @@ class CPUManager:
                 process = run_ryzenadj(command_args)
                 stdout, stderr = process.stdout, process.stderr
                 logger.debug(f"set_cpuTDP result:\n{stdout}")
+                # ryzenadj 在本机会把成功信息写到 stderr（如 "detected compatible
+                # ryzen_smu kernel module" / "Successfully set stapm_limit"），因此不能
+                # 仅凭 stderr 非空就判定失败。run_ryzenadj 已在 returncode==0 时才返回，
+                # 能走到这里说明 ryzenadj 执行成功，直接视为设置成功。
                 if stderr:
-                    logger.error(f"Failed to set AMD CPU TDP:\n{stderr}")
-                    return False
-
+                    logger.debug(f"ryzenadj stderr (非致命):\n{stderr}")
+                logger.info(f"AMD CPU TDP 设置成功: {value}W")
                 return True
             else:
                 logger.error(

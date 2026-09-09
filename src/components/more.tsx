@@ -38,6 +38,7 @@ const getLastCheckText = (lastCheckTime: number): string => {
 };
 
 export const MoreComponent: FC<{ isTab?: boolean }> = ({ isTab = false }) => {
+  (globalThis as any).__traceRender?.("MoreComponent");
   const [currentVersion, setCurrentVersion] = useState<string>(
     Backend.data?.getCurrentVersion() || ""
   );

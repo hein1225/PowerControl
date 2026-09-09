@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import sys
 from typing import Dict, List
 
@@ -7,7 +9,7 @@ import decky
 try:
     import update
     from conf_manager import confManager
-    from config import CPU_VENDOR, logger
+    from config import CPU_ID, CPU_VENDOR, PRODUCT_NAME, logger
     from cpu import cpuManager
     from fan import fanManager
     from fuse_manager import FuseManager
@@ -15,6 +17,8 @@ try:
     from power_manager import PowerManager
     from sysInfo import sysInfoManager
     from ai_tuner import aiTuner
+    from powerstation_manager import powerstationManager
+    from qr_config_server import QRConfigServer
 
     sys.path.append(f"{decky.DECKY_PLUGIN_DIR}/py_modules/site-packages")
 except Exception as e:
@@ -26,6 +30,12 @@ class Plugin:
         self.confManager = confManager
         self.powerManager = PowerManager()
         self.aiTuner = aiTuner
+        self.powerstationManager = powerstationManager
+        # 手机扫码填写 AI 模型配置：仅在用户点击「手机扫码填写」时临时启动本地 HTTP 服务
+        self.qrConfigServer = QRConfigServer(
+            save_cb=lambda bu, ak, m, cs: aiTuner.set_online(bu, ak, m, cs),
+            get_cfg_cb=lambda: aiTuner.get_online(),
+        )
         # 使用单例模式，不再存储 fuseManager 实例
         # 而是每次通过 FuseManager.get_instance() 获取
 
@@ -41,9 +51,25 @@ class Plugin:
         # if enableNativeTDPSlider:
         #     fuseManager.fuse_init()
 
+    async def _bg_init(self):
+        """后台初始化：仅重新应用已保存设置（与原版 PowerControl 行为一致，安全）。
+        注意：绝不在此调用 systemctl / 自愈——那是加载期唯一比原版多、且会触发卡死的
+        系统调用，改为用户在前端「修复」按钮按需触发（见 repair_powerstation_mask）。"""
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, self.powerManager.load)
+        except Exception as e:
+            logger.error(f"[main] powerManager.load 失败: {e}", exc_info=True)
+
     async def _main(self):
         decky.logger.info("start _main")
-        self.powerManager.load()
+        # 关键：fire-and-forget，绝不 await 后台任务！decky 会 await _main()，
+        # 若在此 await 重活，插件初始化会被卡住 → UI 不显示、系统卡死。
+        # 同时 _main 本身不做任何 systemctl/IO，加载期零系统交互，保证插件一定能加载。
+        try:
+            asyncio.create_task(self._bg_init())
+        except Exception as e:
+            logger.error(f"[main] 调度后台初始化失败: {e}", exc_info=True)
 
     async def _unload(self):
         decky.logger.info("start _unload")
@@ -51,7 +77,12 @@ class Plugin:
         # 使用单例模式获取实例并卸载
         # FuseManager.get_instance().unload()
         self.powerManager.unload()
-        logger.info("End PowerControl")
+        try:
+            if getattr(self, "qrConfigServer", None):
+                self.qrConfigServer.stop()
+        except Exception:
+            pass
+        logger.info("End PowerContorlAI")
 
     async def get_settings(self):
         return self.confManager.getSettings()
@@ -107,6 +138,41 @@ class Plugin:
         except Exception as e:
             logger.error(e, exc_info=True)
             return ""
+
+    def _get_gpu_name(self) -> str:
+        """尽量识别集显型号（失败回退为空）。"""
+        try:
+            out = subprocess.check_output(
+                ["lspci"], text=True, stderr=subprocess.DEVNULL, timeout=5
+            )
+            for line in out.splitlines():
+                if "VGA" in line or "Display" in line or "3D" in line:
+                    return line.split(":", 1)[-1].strip()
+        except Exception:
+            pass
+        return ""
+
+    async def get_device_info(self):
+        """返回供 AI 调优识别的设备信息：CPU 型号 / 产品名 / 厂商 / 显卡。
+        GPU 型号识别走后台线程（lspci 同步调用，不放事件循环里）。"""
+        try:
+            gpu_name = await asyncio.get_event_loop().run_in_executor(
+                None, self._get_gpu_name
+            )
+            return {
+                "cpu_model": CPU_ID,
+                "product_name": PRODUCT_NAME,
+                "vendor": CPU_VENDOR,
+                "gpu_name": gpu_name,
+            }
+        except Exception as e:
+            logger.error(f"get_device_info 失败: {e}", exc_info=True)
+            return {
+                "cpu_model": "",
+                "product_name": "",
+                "vendor": CPU_VENDOR,
+                "gpu_name": "",
+            }
 
     async def get_gpuFreqRange(self):
         try:
@@ -705,9 +771,9 @@ class Plugin:
             logger.error(f"get_ai_online 失败: {e}", exc_info=True)
             return {"configured": False, "base_url": "", "model": "", "collect_sec": 600}
 
-    async def set_ai_online(self, base_url: str, api_key: str, model: str) -> bool:
+    async def set_ai_online(self, base_url: str, api_key: str, model: str, collect_sec: int = 600) -> bool:
         try:
-            return self.aiTuner.set_online(base_url, api_key, model)
+            return self.aiTuner.set_online(base_url, api_key, model, collect_sec)
         except Exception as e:
             logger.error(f"set_ai_online 失败: {e}", exc_info=True)
             return False
@@ -746,3 +812,85 @@ class Plugin:
         except Exception as e:
             logger.error(f"stop_ai_tune 失败: {e}", exc_info=True)
             return False
+
+    async def get_ai_tune_enabled(self) -> bool:
+        try:
+            return self.aiTuner.get_enabled()
+        except Exception as e:
+            logger.error(f"get_ai_tune_enabled 失败: {e}", exc_info=True)
+            return False
+
+    async def set_ai_tune_enabled(self, enabled: bool) -> bool:
+        try:
+            return self.aiTuner.set_enabled(bool(enabled))
+        except Exception as e:
+            logger.error(f"set_ai_tune_enabled 失败: {e}", exc_info=True)
+            return False
+
+    # ---------------- 手机扫码填写 AI 模型配置 ----------------
+    async def start_qr_config(self) -> str:
+        """启动本地临时 HTTP 服务，返回手机可访问的 URL（含局域网 IP）。"""
+        try:
+            return self.qrConfigServer.start()
+        except Exception as e:
+            logger.error(f"start_qr_config 失败: {e}", exc_info=True)
+            return ""
+
+    async def get_qr_config_url(self) -> str:
+        """返回当前正在运行的扫码服务 URL（未运行则返回空串）。"""
+        try:
+            return self.qrConfigServer.url() if self.qrConfigServer.running else ""
+        except Exception as e:
+            logger.error(f"get_qr_config_url 失败: {e}", exc_info=True)
+            return ""
+
+    async def stop_qr_config(self) -> bool:
+        """停止并释放本地 HTTP 服务。"""
+        try:
+            self.qrConfigServer.stop()
+            return True
+        except Exception as e:
+            logger.error(f"stop_qr_config 失败: {e}", exc_info=True)
+            return False
+
+    # ---------------- PowerStation 管理（Bazzite 44+ TDP 防重置） ----------------
+    async def get_powerstation_status(self):
+        try:
+            # 后台线程执行 systemctl 调用，避免阻塞 decky 事件循环（挂载设置页时调用）
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self.powerstationManager.get_status
+            )
+        except Exception as e:
+            logger.error(f"get_powerstation_status 失败: {e}", exc_info=True)
+            return {
+                "exists": False,
+                "enabled": False,
+                "masked": False,
+                "active": False,
+                "disabled_by_plugin": False,
+            }
+
+    async def set_powerstation_disabled(self, disabled: bool) -> bool:
+        try:
+            # 放到后台线程执行，避免阻塞后端事件循环
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.powerstationManager.set_disabled(bool(disabled))
+            )
+            return True
+        except Exception as e:
+            logger.error(f"set_powerstation_disabled 失败: {e}", exc_info=True)
+            return False
+
+    async def repair_powerstation_mask(self) -> dict:
+        """按需修复：移除历史版本误留的 powerstation mask 软链（导致系统卡死的持久副作用）。
+        仅由前端「修复」按钮触发，绝不在插件加载期自动调用，避免加载期卡死。"""
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.powerstationManager.repair_if_masked
+            )
+            decky.logger.info(f"[main] powerstation 手动修复结果: {result}")
+            return result or {"was_masked": False, "unmasked": False}
+        except Exception as e:
+            logger.error(f"repair_powerstation_mask 失败: {e}", exc_info=True)
+            return {"error": str(e)}

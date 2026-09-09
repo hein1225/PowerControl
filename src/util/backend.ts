@@ -42,6 +42,7 @@ export const supportedEpp = callable<[], boolean>("supported_epp");
 export const getEppModes = callable<[], string[]>("get_epp_modes");
 export const getCurrentEpp = callable<[], string | null>("get_current_epp");
 export const getCpuVendor = callable<[], string>("get_cpu_vendor");
+export const getDeviceInfo = callable<[], any>("get_device_info");
 export const supportsBypassCharge = callable<[], boolean>("supports_bypass_charge");
 export const supportsChargeLimit = callable<[], boolean>("supports_charge_limit");
 export const supportsResetChargeLimit = callable<[], boolean>("supports_reset_charge_limit");
@@ -119,11 +120,23 @@ export const setCpuOnlineList = callable<[number[]], boolean>("set_cpu_online_li
 
 // ---------------- AI 智能调优（在线 API 版） ----------------
 export const getAiOnline = callable<[], any>("get_ai_online");
-export const setAiOnline = callable<[string, string, string], boolean>("set_ai_online");
+export const setAiOnline = callable<[string, string, string, number], boolean>("set_ai_online");
 export const testAiOnline = callable<[], any>("test_ai_online");
 export const startAiTune = callable<[string, number, number, any, any], any>("start_ai_tune");
 export const getAiTuneStatus = callable<[], any>("get_ai_tune_status");
 export const stopAiTune = callable<[], boolean>("stop_ai_tune");
+export const getAiTuneEnabled = callable<[], boolean>("get_ai_tune_enabled");
+export const setAiTuneEnabled = callable<[boolean], boolean>("set_ai_tune_enabled");
+
+// 手机扫码填写 AI 模型配置（本地临时 HTTP 服务）
+export const startQrConfig = callable<[], string>("start_qr_config");
+export const getQrConfigUrl = callable<[], string>("get_qr_config_url");
+export const stopQrConfig = callable<[], boolean>("stop_qr_config");
+
+// ---------------- PowerStation 管理（Bazzite 44+ TDP 防重置） ----------------
+export const getPowerStationStatus = callable<[], any>("get_powerstation_status");
+export const setPowerStationDisabled = callable<[boolean], boolean>("set_powerstation_disabled");
+export const repairPowerstationMask = callable<[], any>("repair_powerstation_mask");
 
 
 const defaultCpuCoreInfo: CPUCoreInfo = {

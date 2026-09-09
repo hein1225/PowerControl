@@ -1,9 +1,10 @@
 """
 AI 智能调优模块（在线 API 版）
 
-功能：进游戏后由用户选定「目标真实帧数」，插件后台采集约 10 分钟的本机真实帧率与
-遥测，结束后调用用户自备的 OpenAI 兼容在线模型推理出「在达标前提下最省电」的 APU 设置，
-或者直接走内置启发式规则兜底；前端把推荐写入该游戏的专属设置并开启开关。
+功能：进游戏后由用户选定「目标真实帧数」，插件后台分 3 轮调优，每轮约 5 分钟采集本机
+真实帧率与遥测，调用用户自备的 OpenAI 兼容在线模型推理出「在达标前提下最省电」的 APU 设置，
+把该轮结果应用到硬件后再观测下一轮帧率变化，3 轮后正式结束；在线不可用则走本地启发式兜底。
+前端把最终推荐写入该游戏的专属设置并开启开关（自动接管手动调优）。
 
 设计要点：
 - 本模块不写 perApp / 不碰底层 hw 写路径，只负责「采集 + 推理 + 产出 AppSetting 增量」。
@@ -33,6 +34,8 @@ _AI_CFG_MANAGER = SettingsManager(
     name="ai_tune_config", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR
 )
 AI_ONLINE_KEY = "aiOnline"
+# AI 调优是否"接管"手动调优（开启后手动控件置灰，需先关闭才能手动）
+AI_TUNE_ENABLED_KEY = "aiTuneEnabled"
 # 采集时最少需要的有效样本秒数（提前结束时仍可用）
 MIN_SAMPLES = 30
 # 混淆用的固定盐（仅混淆，非密钥保护）
@@ -94,14 +97,14 @@ class AITuner:
     def _save_online(self, cfg: dict):
         _AI_CFG_MANAGER.setSetting(AI_ONLINE_KEY, cfg)
 
-    def set_online(self, base_url: str, api_key: str, model: str) -> bool:
+    def set_online(self, base_url: str, api_key: str, model: str, collect_sec: int = 600) -> bool:
         """保存在线模型配置（密钥混淆落盘）。"""
         try:
             cfg = {
                 "base_url": (base_url or "").rstrip("/"),
                 "api_key": _obfuscate(api_key or ""),
                 "model": model or "",
-                "collect_sec": 600,
+                "collect_sec": int(collect_sec or 600),
             }
             self._save_online(cfg)
             logger.info("[ai_tuner] 在线模型配置已保存")
@@ -120,6 +123,24 @@ class AITuner:
             "model": cfg.get("model", ""),
             "collect_sec": cfg.get("collect_sec", 600),
         }
+
+    def get_enabled(self) -> bool:
+        """AI 调优是否接管手动调优。"""
+        try:
+            return bool(_AI_CFG_MANAGER.getSetting(AI_TUNE_ENABLED_KEY) or False)
+        except Exception as e:
+            logger.error(f"[ai_tuner] 读取 aiTuneEnabled 失败: {e}", exc_info=True)
+            return False
+
+    def set_enabled(self, v: bool) -> bool:
+        """设置 AI 调优接管状态（持久化）。"""
+        try:
+            _AI_CFG_MANAGER.setSetting(AI_TUNE_ENABLED_KEY, bool(v))
+            logger.info(f"[ai_tuner] aiTuneEnabled = {bool(v)}")
+            return True
+        except Exception as e:
+            logger.error(f"[ai_tuner] 设置 aiTuneEnabled 失败: {e}", exc_info=True)
+            return False
 
     def test_online(self) -> dict:
         """连通性自检：发一次极轻量请求。"""
@@ -207,14 +228,16 @@ class AITuner:
             return {"started": False, "message": "未检测到当前游戏，无法调优"}
         if not target_fps or target_fps <= 0:
             return {"started": False, "message": "目标帧数无效"}
-        collect_sec = max(60, int(collect_sec or 600))
+        round_sec = max(60, int(collect_sec or 300))
 
         self._state = {
             "phase": "collecting",
             "app_id": app_id,
             "target_fps": target_fps,
             "elapsed": 0,
-            "total": collect_sec,
+            "total": round_sec,
+            "round": 0,
+            "rounds": 3,
             "collected": 0,
             "samples": [],
             "current": current or {},
@@ -238,6 +261,10 @@ class AITuner:
         s.pop("samples", None)
         s.pop("current", None)
         s.pop("caps", None)
+        # 暴露多轮进度给前端（逐轮应用）
+        for k in ("round", "rounds", "lastDelta", "lastReason", "lastStats"):
+            if k not in s:
+                s[k] = None
         return s
 
     def stop(self) -> bool:
@@ -246,72 +273,129 @@ class AITuner:
             return True
         return False
 
-    # ---------- 内部：采集循环 ----------
+    # ---------- 内部：多轮采集循环 ----------
     async def _collect_and_tune(self):
         st = self._state
-        total = st["total"]
+        cfg = self._load_online()
+        base_url = cfg.get("base_url", "")
+        api_key = _deobfuscate(cfg.get("api_key", ""))
+        model = cfg.get("model", "")
+        ROUNDS = int(st.get("rounds") or 3)
+        round_sec = max(60, int(st.get("total") or 300))
         try:
-            while st["elapsed"] < total and not self._cancel:
-                sample = {
-                    "ts": int(time.time()),
-                    "fps": self.read_native_fps(),
-                    "powerW": None,
-                    "tempC": None,
-                }
-                # 每 5 秒采一次遥测，降低开销
-                if st["collected"] % 5 == 0:
-                    tel = self.read_telemetry()
-                    sample["powerW"] = tel["powerW"]
-                    sample["tempC"] = tel["tempC"]
-                st["samples"].append(sample)
-                st["collected"] += 1
-                st["elapsed"] = st["collected"]
-                await asyncio.sleep(1.0)
+            current = dict(st.get("current") or {})
+            caps = dict(st.get("caps") or {})
+            app_id = st["app_id"]
+            target = st["target_fps"]
+            used_fallback_overall = False
+            last_delta = None
+            last_reason = ""
+            last_stats = None
 
-            if self._cancel and st["collected"] < MIN_SAMPLES:
-                st["phase"] = "cancelled"
-                st["error"] = "已取消，采集样本不足"
-                return
+            for rnd in range(1, ROUNDS + 1):
+                if self._cancel:
+                    break
+                st["round"] = rnd
+                st["phase"] = "collecting"
+                st["samples"] = []
+                st["collected"] = 0
+                st["elapsed"] = 0
+                st["total"] = round_sec
 
-            st["phase"] = "inferring"
-            samples = st["samples"]
-            stats = self._aggregate(samples)
-            if stats.get("nativeFpsP1") is None:
-                st["phase"] = "error"
-                st["error"] = (
-                    "未能读取到本机真实帧率（gamescope 统计不可用）。"
-                    "若使用了插帧工具，请关闭后重试；或在 gamescope 启用 --stats-path。"
-                )
-                return
+                while st["elapsed"] < round_sec and not self._cancel:
+                    sample = {
+                        "ts": int(time.time()),
+                        "fps": self.read_native_fps(),
+                        "powerW": None,
+                        "tempC": None,
+                    }
+                    # 每 5 秒采一次遥测，降低开销
+                    if st["collected"] % 5 == 0:
+                        tel = self.read_telemetry()
+                        sample["powerW"] = tel["powerW"]
+                        sample["tempC"] = tel["tempC"]
+                    st["samples"].append(sample)
+                    st["collected"] += 1
+                    st["elapsed"] = st["collected"]
+                    await asyncio.sleep(1.0)
 
-            cfg = self._load_online()
-            base_url = cfg.get("base_url", "")
-            api_key = _deobfuscate(cfg.get("api_key", ""))
-            model = cfg.get("model", "")
-            used_fallback = False
-            reason = ""
-            try:
-                delta, reason, used_fallback = self._infer(
-                    base_url, api_key, model,
-                    st["target_fps"], stats, st["current"], st["caps"], st["app_id"],
-                )
-            except Exception as e:
-                logger.error(f"[ai_tuner] 在线推理失败，回退启发式: {e}", exc_info=True)
-                delta, reason = self._heuristic(st["target_fps"], stats, st["current"], st["caps"])
-                used_fallback = True
+                if self._cancel and st["collected"] < MIN_SAMPLES:
+                    st["phase"] = "cancelled"
+                    st["error"] = "已取消，采集样本不足"
+                    return
+                if self._cancel:
+                    st["phase"] = "cancelled"
+                    st["error"] = "已取消"
+                    return
 
-            if not delta:
-                delta, reason = self._heuristic(st["target_fps"], stats, st["current"], st["caps"])
-                used_fallback = True
+                st["phase"] = "inferring"
+                samples = st["samples"]
+                stats = self._aggregate(samples)
+                if stats.get("nativeFpsP1") is None:
+                    st["phase"] = "error"
+                    st["error"] = (
+                        "未能读取到本机真实帧率（gamescope 统计不可用）。"
+                        "若使用了插帧工具，请关闭后重试；或在 gamescope 启用 --stats-path。"
+                    )
+                    return
+
+                reason = ""
+                used_fallback = False
+                delta = None
+                try:
+                    delta, reason, used_fallback = self._infer(
+                        base_url, api_key, model,
+                        target, stats, current, caps, app_id,
+                    )
+                except Exception as e:
+                    logger.error(f"[ai_tuner] 在线推理失败，回退启发式: {e}", exc_info=True)
+                    delta, reason = self._heuristic(target, stats, current, caps)
+                    used_fallback = True
+
+                if not delta:
+                    delta, reason = self._heuristic(target, stats, current, caps)
+                    used_fallback = True
+
+                # 统一安全护栏：锁范围 + 降压上限 + TDP 变化幅度，防差异过大/崩溃
+                try:
+                    delta = self._safeguard(delta, current, caps)
+                except Exception as e:
+                    logger.error(f"[ai_tuner] 护栏失败，回退启发式: {e}", exc_info=True)
+                    delta, reason = self._heuristic(target, stats, current, caps)
+                    used_fallback = True
+
+                last_delta = delta
+                last_reason = reason
+                last_stats = stats
+                if used_fallback:
+                    used_fallback_overall = True
+
+                # 把本轮结果并入 current，作为下一轮推理上下文；
+                # 前端会把本轮 lastDelta 应用到硬件，下一轮即可观测帧率变化
+                current.update(delta)
+                st["lastDelta"] = delta
+                st["lastReason"] = reason
+                st["lastStats"] = stats
+                logger.info(f"[ai_tuner] 第 {rnd}/{ROUNDS} 轮完成 app={app_id} fallback={used_fallback}")
+
+                # 非最后一轮，留几秒让前端把本轮结果应用到硬件，下一轮再测帧率变化
+                if rnd < ROUNDS:
+                    await asyncio.sleep(3)
 
             st["result"] = {
-                "delta": delta,
-                "reason": reason,
-                "stats": stats,
-                "used_fallback": used_fallback,
+                "delta": last_delta,
+                "reason": last_reason,
+                "rounds": ROUNDS,
+                "stats": last_stats,
+                "used_fallback": used_fallback_overall,
             }
             st["phase"] = "done"
-            logger.info(f"[ai_tuner] 调优完成 app={st['app_id']} fallback={used_fallback}")
+            # 调优完成后自动接管手动调优（前端据此置灰手动控件）
+            try:
+                self.set_enabled(True)
+            except Exception as e:
+                logger.error(f"[ai_tuner] 标记接管失败: {e}", exc_info=True)
+            logger.info(f"[ai_tuner] 多轮调优完成 app={app_id} 共 {ROUNDS} 轮 fallback={used_fallback_overall}")
         except Exception as e:
             logger.error(f"[ai_tuner] 采集/推理异常: {e}", exc_info=True)
             st["phase"] = "error"
@@ -389,21 +473,29 @@ class AITuner:
         system = (
             "你是掌机 APU 功耗优化专家。目标：在满足『本机 1% 低帧 ≥ 目标真实帧数 × 0.95』"
             "的前提下，给出最省电（APU 功耗最低/续航最长）的设置。\n"
-            "只允许调整以下旋钮，且必须在设备能力范围内："
-            "tdp(APU 总功耗上限 W)、cpuboost(是否 CPU 加速)、cpuNum(在线 CPU 核心数)、"
-            "smt、enableRyzenadjUndervolt+ryzenadjUndervoltValue(每核 CO 降压，负值 mV)、"
-            "gpuMode(fix/range/native)、gpuFreq(fix 时 GPU 定频 MHz)、"
-            "gpuRangeMinFreq/gpuRangeMaxFreq(range 时 GPU 频率区间 MHz)。\n"
+        "只允许调整以下旋钮，且必须在设备能力范围内："
+        "tdp(APU 总功耗上限 W)、cpuboost(是否 CPU 加速)、cpuNum(在线 CPU 核心数)、"
+        "smt、enableRyzenadjUndervolt+ryzenadjUndervoltValue(全核 CO 降压，负值 mV)、"
+        "ryzenadjUndervoltCpuValue(大核 CO 降压 mV，负值)、ryzenadjUndervoltLittleValue(小核 CO 降压 mV，负值)、"
+        "gpuVoltageValue(GPU VDD 偏移 mV，负值降压)、"
+        "gpuMode(fix/range/native)、gpuFreq(fix 时 GPU 定频 MHz)、"
+        "gpuRangeMinFreq/gpuRangeMaxFreq(range 时 GPU 频率区间 MHz)。\n"
             "当前帧率远超目标时，优先降低 tdp、关闭 boost、减少核心、加降压、降低 GPU 频率；"
             "当前帧率低于目标时，提高 tdp/开启 boost 直至达标（此即该硬件最省电达标点）。\n"
-            "只输出一个 JSON 对象，不要任何解释文字，格式："
-            '{"tdp":int,"cpuboost":bool,"cpuNum":int,"smt":bool,'
-            '"enableRyzenadjUndervolt":bool,"ryzenadjUndervoltValue":int,'
-            '"gpuMode":"fix|range|native","gpuFreq":int,"gpuRangeMinFreq":int,'
-            '"gpuRangeMaxFreq":int,"reason":"中文一句话说明"}'
+            "【稳定性硬规则，务必遵守】：降压必须保守，CPU CO 降压绝对值不超过 25mV，"
+            "GPU VDD 偏移绝对值不超过 40mV；TDP 相对当前值的变化不得超过 ±40%；"
+            "禁止任何可能导致系统不稳定的极端值；若不确定则贴近当前值微调。\n"
+        "只输出一个 JSON 对象，不要任何解释文字，格式："
+        '{"tdp":int,"cpuboost":bool,"cpuNum":int,"smt":bool,'
+        '"enableRyzenadjUndervolt":bool,"ryzenadjUndervoltValue":int,'
+        '"ryzenadjUndervoltCpuValue":int,"ryzenadjUndervoltLittleValue":int,'
+        '"gpuVoltageValue":int,'
+        '"gpuMode":"fix|range|native","gpuFreq":int,"gpuRangeMinFreq":int,'
+        '"gpuRangeMaxFreq":int,"reason":"中文一句话说明"}'
         )
         user = (
-            f"设备: {caps.get('deviceName','未知')}\n"
+            f"设备: {caps.get('cpuModel') or caps.get('deviceName') or '未知'} "
+            f"(产品: {caps.get('productName','')}, 显卡: {caps.get('gpuName') or caps.get('vendor','')})\n"
             f"目标真实帧数: {target}\n"
             f"实测统计: {json.dumps(stats, ensure_ascii=False)}\n"
             f"当前设置: {json.dumps(current, ensure_ascii=False)}\n"
@@ -451,6 +543,19 @@ class AITuner:
             rec["ryzenadjUndervoltValue"] = self._clamp(
                 parsed.get("ryzenadjUndervoltValue", 0), -30, 0, 0
             ) if rec["enableRyzenadjUndervolt"] else 0
+        # 更细的 CPU/GPU 电压（分大小核 CO + GPU VDD 偏移）；仅在各自合法范围才采纳
+        if "ryzenadjUndervoltCpuValue" in parsed:
+            rec["ryzenadjUndervoltCpuValue"] = self._clamp(
+                parsed.get("ryzenadjUndervoltCpuValue", 0), -30, 0, 0
+            )
+        if "ryzenadjUndervoltLittleValue" in parsed:
+            rec["ryzenadjUndervoltLittleValue"] = self._clamp(
+                parsed.get("ryzenadjUndervoltLittleValue", 0), -30, 0, 0
+            )
+        if "gpuVoltageValue" in parsed:
+            rec["gpuVoltageValue"] = self._clamp(
+                parsed.get("gpuVoltageValue", 0), -50, 0, 0
+            )
         gpu_mode = parsed.get("gpuMode", current.get("gpuMode"))
         if gpu_mode in ("fix", "range"):
             rec["gpuMode"] = gpu_mode
@@ -461,6 +566,67 @@ class AITuner:
                 rec["gpuRangeMaxFreq"] = self._clamp(parsed.get("gpuRangeMaxFreq", gpu_max), gpu_min, gpu_max, gpu_max)
         reason = parsed.get("reason", "")
         return rec, reason
+
+    def _safeguard(self, delta: dict, current: dict, caps: dict) -> dict:
+        """统一安全护栏：锁死设备范围 + 降压保守上限 + TDP 单次变化幅度限制。
+
+        目的：避免不同次 AI 调优结果差异过大，或降压/降频过猛导致 CPU/GPU 崩溃。
+        任何越界值都被夹回安全区间；非法字段被丢弃。
+        """
+        if not isinstance(delta, dict):
+            return {}
+        tdp_min = caps.get("tdpMin", 3)
+        tdp_max = caps.get("tdpMax", 25)
+        gpu_min = caps.get("gpuMin", 200)
+        gpu_max = caps.get("gpuMax", 1600)
+        cpu_max = caps.get("cpuMaxNum", 8)
+        # 保守降压上限（避免 CPU/GPU 崩溃）
+        SAFE_CO_MAX = 25
+        SAFE_GPU_MAX = 40
+
+        def _i(v, d=0):
+            try:
+                return int(round(float(v)))
+            except Exception:
+                return d
+
+        # TDP：范围内 + 与当前值偏差不超过 ±40%（防大幅跳变）
+        if "tdp" in delta:
+            tdp = max(tdp_min, min(tdp_max, _i(delta["tdp"], tdp_max // 2)))
+            cur = current.get("tdp") or (tdp_max // 2)
+            lo = max(tdp_min, int(round(cur * 0.6)))
+            hi = min(tdp_max, int(round(cur * 1.4)))
+            tdp = max(lo, min(hi, tdp))
+            delta["tdp"] = tdp
+
+        # 降压：锁死保守上限，禁止过猛
+        for k in (
+            "ryzenadjUndervoltValue",
+            "ryzenadjUndervoltCpuValue",
+            "ryzenadjUndervoltLittleValue",
+        ):
+            if k in delta:
+                delta[k] = max(-SAFE_CO_MAX, min(0, _i(delta[k], 0)))
+        if "gpuVoltageValue" in delta:
+            delta["gpuVoltageValue"] = max(-SAFE_GPU_MAX, min(0, _i(delta["gpuVoltageValue"], 0)))
+
+        if "cpuNum" in delta:
+            delta["cpuNum"] = max(2, min(cpu_max, _i(delta["cpuNum"], cpu_max)))
+        if "gpuFreq" in delta:
+            delta["gpuFreq"] = max(gpu_min, min(gpu_max, _i(delta["gpuFreq"], gpu_max)))
+        if "gpuRangeMinFreq" in delta:
+            delta["gpuRangeMinFreq"] = max(
+                gpu_min, min(gpu_max, _i(delta["gpuRangeMinFreq"], gpu_min))
+            )
+        if "gpuRangeMaxFreq" in delta:
+            delta["gpuRangeMaxFreq"] = max(
+                gpu_min, min(gpu_max, _i(delta["gpuRangeMaxFreq"], gpu_max))
+            )
+        # 布尔字段只保留合法布尔
+        for k in ("cpuboost", "smt", "enableRyzenadjUndervolt"):
+            if k in delta:
+                delta[k] = bool(delta[k])
+        return delta
 
     def _heuristic(self, target, stats, current, caps) -> tuple:
         """内置最节能规则（在线不可用 / 解析失败兜底）。"""

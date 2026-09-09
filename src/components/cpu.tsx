@@ -1038,6 +1038,7 @@ const CPUCoreSelectionComponent: FC = () => {
 export const CPUComponent: FC<{
   isTab?: boolean;
 }> = ({ isTab = false }) => {
+  (globalThis as any).__traceRender?.("CPUComponent");
   const [showCpuMenu, setShowCpuMenu] = useState<boolean>(Settings.showCpuMenu);
   const updateShowCpuMenu = (show: boolean) => {
     setShowCpuMenu(show);

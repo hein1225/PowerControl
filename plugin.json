@@ -1,11 +1,11 @@
 {
-  "name": "PowerControl",
+  "name": "PowerContorlAI",
   "author": "yxx, honjow",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["root"],
-    "description": "PowerControl plugin.",
+    "description": "PowerContorlAI plugin (standalone build).",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

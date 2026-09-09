@@ -5,7 +5,7 @@ import {
 } from "typescript-json-serializer";
 import { APPLYTYPE, ComponentName, FANMODE, GPUMODE, UpdateType } from "./enum";
 import { Backend, setTdpBackend } from "./backend";
-import { setCpuFreqByCoreType } from "./backend";
+import { setCpuFreqByCoreType, setAiTuneEnabled as rpcSetAiTuneEnabled } from "./backend";
 import { FanPosition } from "./position";
 import {
   ACStateManager,
@@ -18,7 +18,7 @@ import { EACState } from "./steamClient";
 export const DEFAULT_TDP_MAX = 25;
 export const DEFAULT_TDP_MIN = 3;
 
-const SETTINGS_KEY = "PowerControl";
+const SETTINGS_KEY = "PowerContorlAI";
 const serializer = new JsonSerializer();
 
 @JsonObject()
@@ -520,6 +520,9 @@ export class Settings {
       "gpuRangeMaxFreq",
       "cpuNum",
       "ryzenadjUndervoltValue",
+      "ryzenadjUndervoltCpuValue",
+      "ryzenadjUndervoltLittleValue",
+      "gpuVoltageValue",
       "cpuMaxPerfPct",
     ];
     const boolFields = ["tdpEnable", "cpuboost", "smt", "enableRyzenadjUndervolt"];
@@ -543,6 +546,44 @@ export class Settings {
     // 开启专属设置开关：setOverWrite 会触发 SET_ALL 应用并保存/刷新
     Settings.setOverWrite(true);
     return true;
+  }
+
+  // AI 调优是否"接管"手动调优：开启后置灰手动控件，关闭后恢复手动
+  private static _aiTuneEnabled = (() => {
+    try {
+      return localStorage.getItem("PowerContorlAI_aiTuneEnabled") === "1";
+    } catch {
+      return false;
+    }
+  })();
+  private static _aiTuneListeners = new Set<() => void>();
+
+  static aiTuneEnabled(): boolean {
+    return Settings._aiTuneEnabled;
+  }
+
+  static subscribeAiTuneEnabled(fn: () => void): () => void {
+    Settings._aiTuneListeners.add(fn);
+    return () => Settings._aiTuneListeners.delete(fn);
+  }
+
+  static setAiTuneEnabled(v: boolean) {
+    const nv = !!v;
+    if (nv === Settings._aiTuneEnabled) return;
+    Settings._aiTuneEnabled = nv;
+    try {
+      localStorage.setItem("PowerContorlAI_aiTuneEnabled", nv ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    Settings._aiTuneListeners.forEach((fn) => {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    });
+    rpcSetAiTuneEnabled(nv).catch(() => {});
   }
 
   // static appForceShowTDP(): boolean {

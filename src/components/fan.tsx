@@ -57,6 +57,7 @@ const CANVAS_HEIGHT_LARGE = 300;
 
 //配置使用下拉框
 const FANUseProfileComponent: FC<{ fanIndex: number }> = ({ fanIndex }) => {
+  (globalThis as any).__traceRender?.("FANUseProfileComponent");
   const fanWriteMode = Backend.data.getFanPwmMode(fanIndex);
 
   const buildItems = () => {
@@ -1455,6 +1456,7 @@ function FANCretateProfileModelComponent({
 }
 
 export const FANComponent: FC<{ isTab?: boolean }> = ({ isTab = false }) => {
+  (globalThis as any).__traceRender?.("FANComponent");
   const [show, setShow] = useState<boolean>(Settings.ensureEnable());
   const [index, setIndex] = useState<number>(0);
   const fanEnable = useRef<boolean>(FanControl.fanIsEnable);

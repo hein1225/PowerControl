@@ -167,6 +167,7 @@ const ChargeLimitComponent: FC = () => {
 };
 
 export const PowerComponent: FC<{ isTab?: boolean }> = ({ isTab = false }) => {
+  (globalThis as any).__traceRender?.("PowerComponent");
   const [show, setShow] = useState<boolean>(Settings.ensureEnable());
 
   const supportChargeLimit = useMemo(() => {

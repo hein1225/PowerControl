@@ -525,8 +525,7 @@ def main():
             level=logging.DEBUG,
             format="%(asctime)s [%(filename)s:%(lineno)d:%(funcName)s] %(levelname)s: %(message)s",
             handlers=[
-                logging.StreamHandler(sys.stdout),  # 输出到标准输出而不是标准错误
-                logging.FileHandler("/tmp/fuse_driver_debug.log"),
+                logging.StreamHandler(sys.stdout),  # 输出到标准输出（由 decky 捕获到 journalctl），不再写 /tmp
             ],
         )
 

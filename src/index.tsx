@@ -23,7 +23,7 @@ import {
   Tabs,
 } from "@decky/ui";
 import { FC, useEffect, useMemo, useState } from "react";
-import { FaFan, FaLayerGroup, FaSuperpowers } from "react-icons/fa";
+import { FaFan, FaLayerGroup, FaSuperpowers, FaBrain } from "react-icons/fa";
 import {
   Backend,
   ComponentName,
@@ -41,6 +41,10 @@ import {
   PowerComponent,
 } from "./components";
 import { TabCpu, TabGpu, TabPower, TabMore, TabFans } from "./tab";
+import { TabAiTune } from "./components/aiTune";
+import { ManualLockProvider } from "./components/ManualLock";
+import { PluginErrorBoundary } from "./components/ErrorBoundary";
+import { traceRender } from "./util/renderTrace";
 import { BsCpuFill } from "react-icons/bs";
 import { PiGraphicsCardFill, PiLightningFill } from "react-icons/pi";
 
@@ -58,6 +62,7 @@ const ListView: FC<{}> = ({}) => {
 };
 
 const TabView: FC<{ show?: boolean }> = ({ show = true }) => {
+  traceRender("TabView");
   const [currentTabRoute, setCurrentTabRoute] = useState<string>(
     Settings.currentTabRoute
   );
@@ -107,6 +112,7 @@ const TabView: FC<{ show?: boolean }> = ({ show = true }) => {
             contain: "layout style paint",
           }}
         >
+          <ManualLockProvider>
           <Tabs
             activeTab={currentTabRoute}
             onShowTab={(tabID: string) => {
@@ -152,12 +158,18 @@ const TabView: FC<{ show?: boolean }> = ({ show = true }) => {
                   ]
                 : []),
               {
+                title: <FaBrain size={20} style={{ display: "block" }} />,
+                content: <TabAiTune />,
+                id: "aitune",
+              },
+              {
                 title: <FaLayerGroup size={20} style={{ display: "block" }} />,
                 content: <TabMore />,
                 id: "more",
               },
             ]}
           />
+          </ManualLockProvider>
         </div>
       )}
       {!show && <MoreComponent />}
@@ -165,6 +177,7 @@ const TabView: FC<{ show?: boolean }> = ({ show = true }) => {
   );
 };
 const Content: FC<{}> = ({}) => {
+  traceRender("Content");
   const [useOldUI, setUseOldUI] = useState<boolean>(Settings.useOldUI);
   const [show, setShow] = useState<boolean>(Settings.ensureEnable());
 
@@ -224,17 +237,41 @@ const Content: FC<{}> = ({}) => {
 };
 
 export default definePlugin(() => {
+  // 诊断：追踪 PluginManager.updateComponent / updateAllComponent 的反复调用（#185 循环驱动源）
   try {
-    console.log(">>>>>>>>>>>>>>>> Registering plugin PowerControl");
+    const _pm: any = PluginManager as any;
+    const _upd = _pm.updateComponent && _pm.updateComponent.bind(_pm);
+    const _updAll = _pm.updateAllComponent && _pm.updateAllComponent.bind(_pm);
+    let _n = 0;
+    if (_upd) {
+      _pm.updateComponent = (...a: any[]) => {
+        _n++;
+        if (_n <= 80) console.error("[UCALL] updateComponent", a[0], a[1], new Error().stack);
+        return _upd(...a);
+      };
+    }
+    if (_updAll) {
+      _pm.updateAllComponent = (...a: any[]) => {
+        _n++;
+        if (_n <= 80) console.error("[UCALL] updateAllComponent", JSON.stringify(a), new Error().stack);
+        return _updAll(...a);
+      };
+    }
+  } catch (e) {
+    console.error("update tracer install failed", e);
+  }
+
+  try {
+    console.log(">>>>>>>>>>>>>>>> Registering plugin PowerContorlAI");
     PluginManager.register();
   } catch (e) {
     console.log("Error while registering plugin", e);
   }
 
   return {
-    title: <div className={staticClasses.Title}>PowerControl</div>,
-    titleView: <QuickAccessTitleView title={"PowerControl"} />,
-    content: <Content />,
+    title: <div className={staticClasses.Title}>PowerContorlAI</div>,
+    titleView: <QuickAccessTitleView title={"PowerContorlAI"} />,
+    content: <PluginErrorBoundary>{<Content />}</PluginErrorBoundary>,
     icon: <FaSuperpowers />,
     onDismount() {
       PluginManager?.unregister();

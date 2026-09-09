@@ -61,6 +61,7 @@ const GPUFreqComponent: FC = () => {
 
 //GPURange模块
 const GPURangeComponent: FC = () => {
+  (globalThis as any).__traceRender?.("GPURangeComponent");
   const [gpuRangeMaxFreq, setGPURangeMaxFreq] = useState<number>(
     Settings.appGPURangeMaxFreq()
   );
@@ -125,6 +126,7 @@ const GPURangeComponent: FC = () => {
 
 //GPUAutoMax模块
 const GPUAutoComponent: FC = () => {
+  (globalThis as any).__traceRender?.("GPUAutoComponent");
   const [gpuAutoMaxFreq, setGPUAutoMaxFreq] = useState<number>(
     Settings.appGPUAutoMaxFreq()
   );
@@ -419,6 +421,7 @@ const GPUModeComponent: FC = () => {
 };
 
 export const GPUComponent: FC<{ isTab?: boolean }> = ({ isTab = false }) => {
+  (globalThis as any).__traceRender?.("GPUComponent");
   const [show, setShow] = useState<boolean>(Settings.ensureEnable());
   const hide = (ishide: boolean) => {
     setShow(!ishide);

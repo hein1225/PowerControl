@@ -2,7 +2,6 @@ import logging
 import os
 import subprocess
 
-LOG = "/tmp/PowerControl_systemd.log"
 LOG_TAG = "powercontrol"
 
 
@@ -29,12 +28,5 @@ class SystemdHandler(logging.Handler):
                 env=env,
             )
         except Exception as e:
-            self.write_log(f"systemd-cat error: {e}")
-
-    def write_log(self, msg):
-        try:
-            with open(LOG, "a") as f:
-                f.write(msg)
-                f.write("\n")
-        except Exception as e:
-            print(e)
+            # systemd-cat 不可用时退化为 stderr（由 decky 捕获到 journalctl），不再写 /tmp
+            print(f"[powercontrol] {msg} (systemd-cat error: {e})")

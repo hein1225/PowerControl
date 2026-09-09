@@ -25,12 +25,13 @@ import {
   EACState,
   Logger,
 } from "../util";
-import { getPowerInfo } from "../util/backend";
-import AITuneComponent from "./aiTune";
+import { getPowerInfo, getPowerStationStatus, setPowerStationDisabled, repairPowerstationMask } from "../util/backend";
+import { AITuneConfigComponent, SettingsAITuneGateComponent } from "./aiTune";
 import { localizeStrEnum, localizationManager } from "../i18n";
 import { FaExclamationCircle } from "react-icons/fa";
 
 const SettingsEnableComponent: FC = () => {
+  (globalThis as any).__traceRender?.("SettingsEnableComponent");
   const [enable, setEnable] = useState<boolean>(Settings.ensureEnable());
   const refresh = () => {
     setEnable(Settings.ensureEnable());
@@ -309,6 +310,61 @@ export const SettingsComponent: FC<{
     setShowSettings(show);
     Settings.showSettingMenu = show;
   };
+
+  // PowerStation 开关（Bazzite 44+ TDP 防重置）
+  const [psStatus, setPsStatus] = useState<any>(null);
+  const [psDisabled, setPsDisabled] = useState<boolean>(false);
+  const [psBusy, setPsBusy] = useState<boolean>(false);
+  const [psRepairing, setPsRepairing] = useState<boolean>(false);
+  const [psRepairMsg, setPsRepairMsg] = useState<string>("");
+  const [psNotInstalled, setPsNotInstalled] = useState<boolean>(false);
+  useEffect(() => {
+    getPowerStationStatus()
+      .then((s: any) => {
+        setPsStatus(s);
+        setPsDisabled(!!s?.disabled_by_plugin);
+        setPsNotInstalled(!!s && s.exists === false);
+      })
+      .catch(() => {});
+  }, []);
+  const onTogglePowerStation = async (v: boolean) => {
+    setPsBusy(true);
+    try {
+      const ok = await setPowerStationDisabled(v);
+      if (ok) {
+        setPsDisabled(v);
+        const s = await getPowerStationStatus();
+        setPsStatus(s);
+      }
+    } catch (e) {
+      console.error("setPowerStationDisabled failed", e);
+    } finally {
+      setPsBusy(false);
+    }
+  };
+  // 按需修复：移除历史版本误留的 powerstation mask 软链（导致系统卡死的持久副作用）。
+  // 仅在用户点击时触发，绝不在插件加载期自动运行（避免加载期卡死）。
+  const onRepairPowerStation = async () => {
+    setPsRepairing(true);
+    setPsRepairMsg("修复中…");
+    try {
+      const r = await repairPowerstationMask();
+      if (r?.error) {
+        setPsRepairMsg("修复失败：" + r.error);
+      } else if (r?.unmasked) {
+        setPsRepairMsg("已解除屏蔽，系统恢复正常 ✓");
+      } else {
+        setPsRepairMsg("未发现屏蔽，无需修复 ✓");
+      }
+      const s = await getPowerStationStatus();
+      setPsStatus(s);
+    } catch (e: any) {
+      setPsRepairMsg("修复异常：" + String(e));
+    } finally {
+      setPsRepairing(false);
+    }
+  };
+
   return (
     <>
       <PanelSection
@@ -337,7 +393,52 @@ export const SettingsComponent: FC<{
             <SettingsPerAppComponent />
             <SettingsPerAcStateComponent />
             <SettingsPollingComponent />
-            <AITuneComponent />
+            <AITuneConfigComponent />
+            <SettingsAITuneGateComponent />
+            <PanelSection title="系统兼容 (Bazzite 44+)">
+              <PanelSectionRow>
+                <ToggleField
+                  label="禁用 PowerStation（防止 TDP 被重置）"
+                  description="Bazzite 44 把 TDP 控制权交给了 SteamOS-Manager/PowerStation，它会在进游戏时覆盖 PowerContorlAI 的 TDP。关闭后由 PowerContorlAI 完全接管（含风扇）。需 root 权限。"
+                  checked={psDisabled}
+                  disabled={psNotInstalled || psBusy}
+                  onChange={onTogglePowerStation}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={psRepairing || psNotInstalled}
+                  onClick={onRepairPowerStation}
+                >
+                  {psRepairing ? "修复中…" : "修复系统 powerstation 状态（解除卡死）"}
+                </ButtonItem>
+              </PanelSectionRow>
+              {psStatus && (
+                <PanelSectionRow>
+                  <div style={{ fontSize: 12, opacity: 0.7, lineHeight: 1.5 }}>
+                    状态：
+                    {!psStatus.exists
+                      ? "未安装 powerstation（无需处理）"
+                      : psStatus.active
+                      ? "运行中（正在接管 TDP）"
+                      : psStatus.masked
+                      ? "已屏蔽（不接管 TDP）"
+                      : psStatus.enabled
+                      ? "已启用（会接管 TDP）"
+                      : "存在但未启用"}
+                    {" · "}
+                    {psDisabled ? "已设为禁用（开机自动保持）" : "未禁用"}
+                    {psBusy ? " · 操作中…" : ""}
+                  </div>
+                </PanelSectionRow>
+              )}
+              {psRepairMsg && (
+                <PanelSectionRow>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>{psRepairMsg}</div>
+                </PanelSectionRow>
+              )}
+            </PanelSection>
           </>
         )}
       </PanelSection>

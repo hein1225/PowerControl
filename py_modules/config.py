@@ -8,22 +8,17 @@ from logging_handler import SystemdHandler
 
 import decky
 
-# 日志配置
-LOG_LOCATION = "/tmp/PowerControl_py.log"
+# 日志配置（仅走 journalctl / systemd-cat，不再写 /tmp 文件）
 LOG_LEVEL = logging.DEBUG
 
 
 def setup_logger():
     # 定义日志格式
-    file_format = "[%(asctime)s | %(filename)s:%(lineno)s:%(funcName)s] %(levelname)s: %(message)s"
     systemd_format = "[%(filename)s:%(lineno)s:%(funcName)s] %(levelname)s: %(message)s"
 
     # 创建并配置 handlers
     systemd_handler = SystemdHandler()
     systemd_handler.setFormatter(logging.Formatter(systemd_format))
-
-    file_handler = logging.FileHandler(filename=LOG_LOCATION, mode="w")
-    file_handler.setFormatter(logging.Formatter(file_format))
 
     # 获取 logger
     try:
@@ -33,7 +28,6 @@ def setup_logger():
 
     logger.setLevel(LOG_LEVEL)
     logger.addHandler(systemd_handler)
-    logger.addHandler(file_handler)
 
     return logger
 
@@ -64,7 +58,7 @@ EC_SCHEMA = f"{FAN_CONFIG_DIR}/schema/ec.json"
 
 API_URL = "https://api.github.com/repos/mengmeet/PowerControl/releases/latest"
 
-CONFIG_KEY = "PowerControl"
+CONFIG_KEY = "PowerContorlAI"
 
 # 路径配置
 try:
